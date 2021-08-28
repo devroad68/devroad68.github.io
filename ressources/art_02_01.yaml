@@ -1,0 +1,232 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Connexion VPN entre un reseau local et un sous reseau prive sur le cloud AWS
+  Acces le reseau prive vers l'Internet mais pas l'enverse
+
+Mappings:
+  AWSRegionToAMI:
+    eu-west-3:
+      # https://docs.aws.amazon.com/fr_fr/AWSEC2/latest/UserGuide/creating-an-ami-ebs.html
+      AMIID: ami-0d49cec198762b78c
+
+Parameters:
+  ClientCidr:
+    Type: String
+    Description: Specifies the CIDR/IP range for VPN Client
+    Default: 172.16.10.0/24
+  AllDestinationCidr:
+    Type: String
+    Description: Optional - Specifies the CIDR/IP range for Destination
+    Default: 0.0.0.0/0
+  Ec2InstanceType:
+    Type: String
+    Description: >
+      Specifies the EC2 instance type for your container instances.
+      Defaults to t2.micro
+    # https://aws.amazon.com/fr/ec2/instance-types/
+    Default: t2.micro
+  KeyName:
+    Type: String
+    Description: >
+      Optional - Specifies the name of an existing Amazon EC2 key pair
+      to enable SSH access to the EC2 instances in your cluster.
+    # https://docs.aws.amazon.com/fr_fr/amazondynamodb/latest/developerguide/EMRforDynamoDB.Tutorial.EC2KeyPair.html
+    Default: devroad
+  MyPubIp:
+    Type: String
+    Description: Specifies the Public Address of my network
+    # Mon adresse IP personnelle
+    Default: 83.XXX.10.XXX
+  VpcCidr:
+    Type: String
+    Description: Optional - Specifies the CIDR Block of VPC
+    Default: 10.0.0.0/16
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-myVPC"
+
+  PubSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      # ["10.0.0.0/16", 1, 8] => ["10.0.0.0/24"] => 10.0.0.0/24
+      CidrBlock: !Select [ 0, !Cidr [ !GetAtt Vpc.CidrBlock, 1, 8 ]]
+      # [eu-west-3a, eu-west-3b, eu-west-3c] => eu-west-3a
+      AvailabilityZone: !Select [ 0, Fn::GetAZs: !Ref AWS::Region ]
+      MapPublicIpOnLaunch: true
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PubSubnet"
+
+  PrivSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      # ["10.0.0.0/16", 2, 8] => ["10.0.0.0/24", "10.0.1.0/24"] => 10.0.1.0/24
+      CidrBlock: !Select [ 1, !Cidr [ !GetAtt Vpc.CidrBlock, 2, 8 ]]
+      # [eu-west-3a, eu-west-3b, eu-west-3c] => eu-west-3a
+      AvailabilityZone: !Select [ 0, Fn::GetAZs: !Ref AWS::Region ]
+      MapPublicIpOnLaunch: false
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PrivSubnet"
+
+  VPCSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPC Security Group
+      GroupName: !Sub "${AWS::StackName}-SG-VPC"
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: !Ref AllDestinationCidr
+      SecurityGroupIngress:
+      - IpProtocol: -1
+        CidrIp: !Ref AllDestinationCidr
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: !Ref AllDestinationCidr
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Ref AllDestinationCidr
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1
+        CidrIp: !Ref AllDestinationCidr
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-SG-VPC"
+      VpcId: !Ref Vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-Internet Gateway"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-Elastic IP"
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref PubSubnet
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-Nat Gateway"
+
+  RteTablePriv:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-RteTable Priv"
+      VpcId: !Ref Vpc
+
+  RouteVGW:
+    DependsOn: AttachVpnGateway
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RteTablePriv
+      DestinationCidrBlock: !Ref ClientCidr
+      GatewayId: !Ref VPNGateway
+
+  RouteNatGW:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RteTablePriv
+      DestinationCidrBlock: !Ref AllDestinationCidr
+      NatGatewayId: !Ref NatGateway
+
+  RteTableAssociationPriv:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivSubnet
+      RouteTableId: !Ref RteTablePriv
+
+  RteTablePub:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-RteTable Pub"
+      VpcId: !Ref Vpc
+
+  RouteInternetGateway:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RteTablePub
+      DestinationCidrBlock: !Ref AllDestinationCidr
+      GatewayId: !Ref InternetGateway
+
+  RteTableAssociationPub:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PubSubnet
+      RouteTableId: !Ref RteTablePub
+
+  CustomerGateway:
+    Type: AWS::EC2::CustomerGateway
+    Properties:
+      # Border Gateway Protocol : est un protocole d'échange de route externe
+      BgpAsn: 65000
+      IpAddress: !Ref MyPubIp
+      Type: ipsec.1
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-Customer Gateway"
+
+  VPNGateway:
+    Type: AWS::EC2::VPNGateway
+    Properties:
+      Type: ipsec.1
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-VPN Gateway"
+
+  AttachVpnGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      VpnGatewayId: !Ref VPNGateway
+
+  IntranetEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      # [eu-west-3a, eu-west-3b, eu-west-3c] => eu-west-3a
+      AvailabilityZone: !Select [ 0, Fn::GetAZs: !Ref AWS::Region ]
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref AWS::Region, AMIID]
+      InstanceType: !Ref Ec2InstanceType
+      KeyName: !Ref KeyName
+      Monitoring: false
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: false
+        DeviceIndex: 0
+        GroupSet: [ !Ref VPCSecurityGroup ]
+        SubnetId: !Ref PrivSubnet
+      Tags:
+      - Key: Name
+        Value: Linux
+

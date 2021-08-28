@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# Une chaîne de caractères contenant la clé de chiffrage, ex : "AZERTY2021"
+PRE_SHARED_KEY="$1"
+# Une chaîne de caractères contenant le CIDR du réseau local, ex: "172.16.10.0/24"
+LOCAL_IPV4_NETWORK_CIDR="$2"
+# Une chaîne de caractères contenant le CIDR du réseau Cloud AWS ou réseau distant, ex: "10.0.1.0/24"
+REMOTE_IPV4_NETWORK_CIDR="$3"
+
+if [ $# -lt 3 ];then
+    echo "Le script a besoin 3 paramètres en entrée !"
+    echo "Une chaîne de caractères contenant la clé de chiffrage, ex : \"AZERTY2021\""
+    echo "Une chaîne de caractères contenant le CIDR du réseau local, ex: \"172.16.10.0/24\""
+    echo "Une chaîne de caractères contenant le CIDR du réseau Cloud AWS ou réseau distant, ex: \"10.0.1.0/24\""
+    exit 0
+fi
+
+
+CANAL="{DPDTimeoutAction=clear,DPDTimeoutSeconds=30,IKEVersions=[{Value=ikev2}],Phase1DHGroupNumbers=[{Value=14}],Phase1EncryptionAlgorithms=[{Value=AES256}],Phase1IntegrityAlgorithms=[{Value=SHA2-512}],Phase1LifetimeSeconds=28800,Phase2DHGroupNumbers=[{Value=14}],Phase2EncryptionAlgorithms=[{Value=AES256}],Phase2IntegrityAlgorithms=[{Value=SHA2-512}],Phase2LifetimeSeconds=3600,PreSharedKey="$PRE_SHARED_KEY",RekeyFuzzPercentage=100,RekeyMarginTimeSeconds=540,ReplayWindowSize=1024,StartupAction=add}"
+
+getValue(){
+    local param1=$1
+    local param2=$2
+    resCGW=$param1
+    searchCGW=$param2
+    prefixCGW=${resCGW%%$searchCGW*}
+    firstCGW=${#prefixCGW}
+    CGW_ID=${resCGW:$firstCGW:21}
+    echo $CGW_ID
+}
+
+# Pour installer la ligne de commande aws cli
+# https://docs.aws.amazon.com/fr_fr/cli/latest/userguide/install-cliv2-linux.html
+
+commnad1=$(aws ec2 describe-customer-gateways)
+commnad2=$(aws ec2 describe-vpn-gateways)
+
+CUSTOMER_GATEWAY_ID=$(getValue "$commnad1" "cgw-")
+VIRTUAL_PRIVATE_GATEWAY=$(getValue "$commnad2" "vgw-")
+
+echo $CUSTOMER_GATEWAY_ID
+echo $VIRTUAL_PRIVATE_GATEWAY
+
+command3=$(aws ec2 create-vpn-connection \
+--customer-gateway-id $CUSTOMER_GATEWAY_ID \
+--vpn-gateway-id $VIRTUAL_PRIVATE_GATEWAY \
+--type "ipsec.1" \
+--options LocalIpv4NetworkCidr=\"$LOCAL_IPV4_NETWORK_CIDR\",RemoteIpv4NetworkCidr=\"$REMOTE_IPV4_NETWORK_CIDR\",EnableAcceleration=false,StaticRoutesOnly=true,TunnelInsideIpVersion=ipv4,TunnelOptions="[$CANAL,$CANAL]")
+
+VPN_ID=$(getValue "$command3" "vpn-")
+echo $VPN_ID
+
+aws ec2 create-vpn-connection-route --destination-cidr-block $LOCAL_IPV4_NETWORK_CIDR --vpn-connection-id $VPN_ID
+
+### Pour supprimer la connexion VPN
+# aws ec2 delete-vpn-connection --vpn-connection-id vpn-0ed2ee4cdd13e8d3e
